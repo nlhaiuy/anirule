@@ -25,7 +25,9 @@ jobs:
 
       # GitHub 的 ubuntu 运行环境自带 Android SDK 并设置了 ANDROID_HOME，settings.gradle.kts 会因此包含 :app
       - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --stacktrace --console=plain 2>&1 | tee build.log
 
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk anirule-debug.apk
@@ -47,4 +49,18 @@ jobs:
       # 测试单独跑：Kotlin 测试失败不影响 APK 产出，但会在日志里显示
       - name: Run core tests
         continue-on-error: true
-        run: gradle :core:test --stacktrace
+        run: |
+          set -o pipefail
+          gradle :core:test --stacktrace --console=plain 2>&1 | tee test.log
+
+      # 不管成功失败，都把日志推到 ci-log 分支，方便排查（只保留最近一次）
+      - name: Push logs to ci-log branch
+        if: always()
+        run: |
+          mkdir -p /tmp/logrepo && cd /tmp/logrepo
+          git init -q -b ci-log
+          for f in build.log test.log; do [ -f "$GITHUB_WORKSPACE/$f" ] && tail -n 400 "$GITHUB_WORKSPACE/$f" > "$f"; done
+          cp -r "$GITHUB_WORKSPACE"/core/build/reports/tests/test ./test-report 2>/dev/null || true
+          git add -A
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "ci logs for ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" ci-log
