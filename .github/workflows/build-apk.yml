@@ -1,0 +1,50 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      # GitHub 的 ubuntu 运行环境自带 Android SDK 并设置了 ANDROID_HOME，settings.gradle.kts 会因此包含 :app
+      - name: Build debug APK
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk anirule-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anirule-debug-apk
+          path: anirule-debug.apk
+
+      # 放到 Releases 页面，手机上直接点开下载（不需要解压）
+      - name: Publish to Releases (nightly)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Latest debug build
+          prerelease: true
+          files: anirule-debug.apk
+
+      # 测试单独跑：Kotlin 测试失败不影响 APK 产出，但会在日志里显示
+      - name: Run core tests
+        continue-on-error: true
+        run: gradle :core:test --stacktrace
