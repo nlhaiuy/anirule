@@ -1,0 +1,6 @@
+__pycache__/
+node_modules/
+build/
+.gradle/
+local.properties
+*.zip
