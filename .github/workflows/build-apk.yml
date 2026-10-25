@@ -21,29 +21,46 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.9
+          gradle-version: "8.14.3"
 
-      # Android SDK 在 ubuntu-latest 上已预装（ANDROID_HOME 已设置），所以 settings.gradle.kts 会包含 :app
-      - name: Core tests
-        run: gradle :core:test --no-daemon
-        continue-on-error: true
-
+      # GitHub 的 ubuntu 运行环境自带 Android SDK 并设置了 ANDROID_HOME，settings.gradle.kts 会因此包含 :app
       - name: Build debug APK
-        run: gradle :app:assembleDebug --no-daemon
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: animeko-rulegen-debug
-          path: app/build/outputs/apk/debug/*.apk
-
-      - name: Publish to the "latest" release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk animeko-rulegen.apk
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest animeko-rulegen.apk \
-            --title "最新构建" \
-            --notes "自动构建的 debug APK（提交 ${GITHUB_SHA::7}）。" \
-            --prerelease
+          set -o pipefail
+          gradle :app:assembleDebug --stacktrace --console=plain 2>&1 | tee build.log
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk anirule-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anirule-debug-apk
+          path: anirule-debug.apk
+
+      # 放到 Releases 页面，手机上直接点开下载（不需要解压）
+      - name: Publish to Releases (nightly)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Latest debug build
+          prerelease: true
+          files: anirule-debug.apk
+
+      # 测试单独跑：Kotlin 测试失败不影响 APK 产出，但会在日志里显示
+      - name: Run core tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle :core:test --stacktrace --console=plain 2>&1 | tee test.log
+
+      # 不管成功失败，都把日志推到 ci-log 分支，方便排查（只保留最近一次）
+      - name: Push logs to ci-log branch
+        if: always()
+        run: |
+          mkdir -p /tmp/logrepo && cd /tmp/logrepo
+          git init -q -b ci-log
+          for f in build.log test.log; do [ -f "$GITHUB_WORKSPACE/$f" ] && tail -n 400 "$GITHUB_WORKSPACE/$f" > "$f"; done
+          cp -r "$GITHUB_WORKSPACE"/core/build/reports/tests/test ./test-report 2>/dev/null || true
+          git add -A
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "ci logs for ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" ci-log
