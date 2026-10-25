@@ -26,6 +26,7 @@ class WebViewBrowser(private val webView: WebView, private val captureJs: String
     @Volatile private var loading = false
     @Volatile private var pageLatch: CountDownLatch? = null
     @Volatile private var lastRecordAt = 0L
+    private var defaultUa = ""
 
     private inner class Bridge {
         @JavascriptInterface
@@ -49,6 +50,7 @@ class WebViewBrowser(private val webView: WebView, private val captureJs: String
         ui.post {
             webView.settings.javaScriptEnabled = true
             webView.settings.domStorageEnabled = true
+            defaultUa = webView.settings.userAgentString
             webView.addJavascriptInterface(Bridge(), "AndroidRG")
             val early = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
             if (early) WebViewCompat.addDocumentStartJavaScript(webView, captureJs, setOf("*"))
@@ -63,6 +65,18 @@ class WebViewBrowser(private val webView: WebView, private val captureJs: String
                 }
             }
         }
+    }
+
+    /** 桌面版：桌面 UA + 宽视口。桌面页面的搜索框和链接结构通常更完整，也更接近 Animeko 直接请求时拿到的页面。 */
+    override fun setDesktopMode(desktop: Boolean) {
+        val latch = CountDownLatch(1)
+        ui.post {
+            webView.settings.userAgentString = if (desktop) DESKTOP_UA else defaultUa
+            webView.settings.useWideViewPort = desktop
+            webView.settings.loadWithOverviewMode = desktop
+            latch.countDown()
+        }
+        latch.await(5, TimeUnit.SECONDS)
     }
 
     override fun load(url: String) {
@@ -105,4 +119,9 @@ class WebViewBrowser(private val webView: WebView, private val captureJs: String
     }
 
     override fun records(): List<CaptureRecord> = synchronized(recs) { ArrayList(recs) }
+
+    private companion object {
+        const val DESKTOP_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
 }

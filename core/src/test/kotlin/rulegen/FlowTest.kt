@@ -26,6 +26,7 @@ class FlowTest {
         override fun currentUrl() = url
         override fun waitIdle() {}
         override fun records(): List<CaptureRecord> = recs
+        override fun fetchRaw(url: String): String? = null // 假站点没有"原始 HTML"，避免默认实现空等
         fun emit(url: String, body: String, response: String, headers: Map<String, String>) {
             recs += CaptureRecord("fetch", url, "POST", headers, body, 200, response)
         }
@@ -87,7 +88,7 @@ class FlowTest {
     private object NoSearchSite : Site() {}
 
     private val kws = listOf("葬送的芙莉莲", "孤独摇滚")
-    private fun go(site: Site) = Flow.run("https://site.example/", FakeBrowser(site), kws)
+    private fun go(site: Site) = Flow.run("https://site.example/", FakeBrowser(site), keywords = kws, pauseMs = 0)
 
     @Test
     fun jsonSiteFullAuto() {

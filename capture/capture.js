@@ -255,7 +255,17 @@
       click(found);
       return 'ok';
     },
+    // 用页面自己的 fetch 取原始 HTML（不执行页面 JS）。响应通过已挂钩的 fetch 记录回传
+    rawFetch: function (url) {
+      try { g.fetch(String(url), { credentials: 'include' }); return 'started'; } catch (e) { return 'error'; }
+    },
     dom: function () { return doc.documentElement ? doc.documentElement.outerHTML : ''; },
+    // 页面标题 + 正文开头：失败时写进诊断信息，方便判断是验证码、限流还是没有结果
+    snippet: function () {
+      var t = doc.title || '';
+      var b = doc.body ? (doc.body.innerText || doc.body.textContent || '') : '';
+      return (t + ' ' + b).replace(/\s+/g, ' ').trim().slice(0, 200);
+    },
     status: function () { return JSON.stringify({ url: g.location.href, ready: doc.readyState, count: seq }); }
   };
   g.__rg = rg;

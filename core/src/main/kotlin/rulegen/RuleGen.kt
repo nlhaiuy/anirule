@@ -20,23 +20,29 @@ data class TestReport(
 
 /** Animeko web-selector 规则的自动生成与测试（只覆盖"搜索条目"这一步）。 */
 object RuleGen {
-    private val SKIP_TAGS = setOf(
+    internal val SKIP_TAGS = setOf(
         "script", "style", "head", "title", "meta", "link", "noscript",
         "input", "textarea", "option", "select", "button", "form",
     )
     private const val MAX_DEPTH = 10
-    private val DIGIT = Regex("\\d")
+    internal val DIGIT = Regex("\\d")
     private val SPACES = Regex("\\s+")
 
-    private fun norm(s: String?): String = (s ?: "").replace(SPACES, "").lowercase()
+    internal fun norm(s: String?): String = (s ?: "").replace(SPACES, "").lowercase()
+
+    // 状态类（激活/选中/轮播位置等）会随交互变化，不能进选择器
+    private val STATE_CLASS = Regex(
+        "^(active|current|cur|on|selected|sel|checked|open|show|hover|focus|first|last|odd|even|hide|hidden|fade|in)$|^swiper-slide-.*",
+        RegexOption.IGNORE_CASE,
+    )
 
     private fun stableClasses(e: Element): List<String> =
-        e.classNames().filter { it.isNotEmpty() && !DIGIT.containsMatchIn(it) }
+        e.classNames().filter { it.isNotEmpty() && !DIGIT.containsMatchIn(it) && !STATE_CLASS.matches(it) }
 
-    private fun isRoot(e: Element?): Boolean = e == null || e.tagName() in setOf("html", "body", "#root")
+    internal fun isRoot(e: Element?): Boolean = e == null || e.tagName() in setOf("html", "body", "#root")
 
     /** 从 body 下到 e 的 "tag.class" 片段列表。 */
-    private fun chainOf(e: Element): List<String> {
+    internal fun chainOf(e: Element): List<String> {
         val parts = ArrayList<String>()
         var cur: Element? = e
         while (cur != null && !isRoot(cur)) {
@@ -47,11 +53,11 @@ object RuleGen {
         return parts
     }
 
-    private fun safeSelect(doc: Document, css: String): List<Element> =
+    internal fun safeSelect(doc: Document, css: String): List<Element> =
         try { doc.select(css).toList() } catch (_: Exception) { emptyList() }
 
     /** 能精确选中 targets 的最短 CSS 选择器（只用 class 与 '>'，不用 nth）。 */
-    private fun minimalSelector(doc: Document, targets: List<Element>): String {
+    internal fun minimalSelector(doc: Document, targets: List<Element>): String {
         val chain = chainOf(targets.first())
         val full = chain.joinToString(" > ")
         val fullSet = safeSelect(doc, full).toSet()
@@ -62,7 +68,7 @@ object RuleGen {
         return full
     }
 
-    private fun inSkipped(e: Element): Boolean =
+    internal fun inSkipped(e: Element): Boolean =
         e.tagName() in SKIP_TAGS || e.parents().any { it.tagName() in SKIP_TAGS }
 
     private fun findSeeds(doc: Document, keyword: String): List<Element> {

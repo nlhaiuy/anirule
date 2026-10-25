@@ -29,6 +29,9 @@ object Discover {
         "/search/?q={keyword}",
         "/search?keyword={keyword}",
         "/?s={keyword}",
+        "/vodsearch/{keyword}-------------.html",
+        "/search/{keyword}.html",
+        "/search/{keyword}/",
     )
     private val TEXT_INPUT_NAMES = setOf("wd", "q", "keyword", "key", "kw", "s", "searchword", "query", "search")
 
@@ -55,8 +58,9 @@ object Discover {
         return out
     }
 
-    private fun candidates(url: String, homeHtml: String?, notes: MutableList<String>): List<String> {
-        val u = URI(url)
+    fun candidates(url: String, homeHtml: String?, notes: MutableList<String>): List<String> {
+        // URI 不接受花括号，先把占位符换掉再解析
+        val u = URI(url.replace("{keyword}", "KEYWORD"))
         val origin = "${u.scheme}://${u.authority}"
         val all = ArrayList<String>()
         if ("{keyword}" in url) all += url

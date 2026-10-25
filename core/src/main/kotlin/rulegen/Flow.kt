@@ -3,7 +3,10 @@ package rulegen
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
 
@@ -25,19 +28,38 @@ interface Browser {
     fun currentUrl(): String
     fun waitIdle()
     fun records(): List<CaptureRecord>
+
+    /** 切换桌面版/手机版页面（User-Agent 与视口）。默认什么也不做。 */
+    fun setDesktopMode(desktop: Boolean) {}
+
+    /**
+     * 用页面自己的 fetch 取原始 HTML（不执行页面 JS），也就是 Animeko 的 HTML 数据源实际会拿到的内容。
+     * 失败返回 null。
+     */
+    fun fetchRaw(url: String): String? {
+        val mark = records().size
+        call("rawFetch", url)
+        repeat(50) {
+            records().drop(mark).firstOrNull {
+                it.type == "fetch" && it.status != null && it.url.trimEnd('/') == url.trimEnd('/')
+            }?.let { r -> return if (r.status in 200..299) r.response else null }
+            Thread.sleep(200)
+        }
+        return null
+    }
 }
 
 data class FlowResult(
     val ok: Boolean,
     val mode: String = "",       // "json-api" | "html" | ""
-    val partial: Boolean = false, // json-api 没拿到完整三个阶段
+    val partial: Boolean = false, // 没拿到完整的三个阶段（json-api）或没拿到剧集（html）
     val rule: JsonObject? = null,
     val report: TestReport? = null,
     val keyword: String = "",
     val notes: List<String> = emptyList(),
 )
 
-/** 全自动流程：自动搜索 → 点进详情 → 点第一集 → 从抓到的接口生成并测试规则。 */
+/** 全自动流程：自动搜索 → 点进详情 → 点第一集 → 从抓到的接口/页面生成并测试规则。对站点不做任何特殊处理。 */
 object Flow {
     val KEYWORDS = listOf("葬送的芙莉莲", "孤独摇滚", "药屋少女的呢喃", "咒术回战", "鬼灭之刃")
     private val SKIP_HEADERS = setOf(
@@ -45,6 +67,7 @@ object Flow {
     )
     private const val PAGE_KEYS = "page|page_number|pageNum|pageNo|pn|current"
     private const val SIZE_KEYS = "pageSize|page_size|items_per_page|limit|per_page|perPage|size"
+    private val RATE_LIMIT = Regex("频繁|太快|过于快|稍后再|请.{0,6}(勿|不要).{0,6}(搜索|操作)|搜索.{0,8}间隔|\\d+\\s*秒后")
 
     private fun parse(text: String): JsonElement? {
         val t = text.trimStart()
@@ -63,7 +86,7 @@ object Flow {
         URLEncoder.encode(s, "UTF-8").let { if (plus) it else it.replace("+", "%20") }
 
     private fun subKeyword(text: String, kw: String): String =
-        listOf(kw, enc(kw, false), enc(kw, true)).fold(text) { acc, f -> acc.replace(f, "{keyword}") }
+        listOf(kw, enc(kw, false), enc(kw, true)).distinct().fold(text) { acc, f -> acc.replace(f, "{keyword}", ignoreCase = true) }
 
     private data class Paged(val url: String, val body: String, val size: Int?)
 
@@ -92,6 +115,54 @@ object Flow {
 
     private fun origin(url: String): String = URI(url).let { "${it.scheme}://${it.authority}" }
 
+    private fun resolve(base: String, ref: String): String = try {
+        URI(base).resolve(ref.trim().replace(" ", "%20")).toString()
+    } catch (_: Exception) { ref }
+
+    // ---------- 规则 JSON 的小改动 ----------
+
+    private fun JsonObject.editArgs(edit: (MutableMap<String, JsonElement>) -> Unit): JsonObject {
+        val args = this["arguments"]!!.jsonObject.toMutableMap()
+        edit(args)
+        return JsonObject(toMutableMap().also { it["arguments"] = JsonObject(args) })
+    }
+
+    private fun JsonObject.editConfig(edit: (MutableMap<String, JsonElement>) -> Unit): JsonObject = editArgs { args ->
+        val cfg = args["searchConfig"]!!.jsonObject.toMutableMap()
+        edit(cfg)
+        args["searchConfig"] = JsonObject(cfg)
+    }
+
+    private fun JsonObject.withMeta(name: String, icon: String): JsonObject = editArgs {
+        it["name"] = JsonPrimitive(name)
+        it["iconUrl"] = JsonPrimitive(icon)
+    }
+
+    private fun FlowResult.withMeta(name: String, icon: String) = copy(rule = rule?.withMeta(name, icon))
+
+    // ---------- 入口 ----------
+
+    /**
+     * 先用桌面版页面（搜索框、链接结构通常更完整），失败再换手机版。
+     * name 为 null 时从首页自动取站点名，图标同理。
+     * pauseMs：两次搜索之间的间隔，避免触发站点的搜索频率限制。
+     */
+    fun run(
+        url: String, browser: Browser, keywords: List<String> = KEYWORDS, name: String? = null, pauseMs: Long = 4000,
+    ): FlowResult {
+        val all = ArrayList<String>()
+        for (desktop in listOf(true, false)) {
+            browser.setDesktopMode(desktop)
+            val label = if (desktop) "[桌面版] " else "[手机版] "
+            val r = runOnce(url, browser, if (desktop) keywords else keywords.take(2), name, pauseMs)
+            if (r.ok) return r.copy(notes = all + r.notes.map { label + it })
+            all += r.notes.map { label + it }
+        }
+        return FlowResult(false, notes = all + "桌面版和手机版都没有生成可用规则")
+    }
+
+    private fun sleep(ms: Long) { if (ms > 0) Thread.sleep(ms) }
+
     private fun doSearch(b: Browser, kw: String, notes: MutableList<String>): Boolean {
         var res = b.call("fillSearch", kw)
         if (res == "no-input" && b.call("openSearch") == "ok") {
@@ -103,48 +174,148 @@ object Flow {
         return true
     }
 
-    fun run(url: String, browser: Browser, keywords: List<String> = KEYWORDS, name: String = "示例动漫"): FlowResult {
+    private fun runOnce(url: String, browser: Browser, keywords: List<String>, nameArg: String?, pauseMs: Long): FlowResult {
         val notes = ArrayList<String>()
         browser.load(url)
         browser.waitIdle()
-        for (kw in keywords) {
-            val mark = browser.records().size
-            if (!doSearch(browser, kw, notes)) {
-                browser.load(url); browser.waitIdle(); continue
-            }
-            val fresh = browser.records().drop(mark)
+        val homeDom = browser.call("dom")
+        val homeUrl = browser.currentUrl().ifEmpty { url }
+        val meta = if (homeDom.isNotBlank()) SiteMeta.extract(homeDom, homeUrl)
+        else SiteMeta.Meta(SiteMeta.extractName("", "", "", url), "")
+        val name = nameArg ?: meta.name
+        val icon = meta.iconUrl
 
-            // JSON 接口：挑条目数最多的搜索响应
-            var best: Triple<CaptureRecord, JsonElement, Map<String, Any?>>? = null
-            var bestN = -1
-            for ((rec, data) in apiRecords(fresh)) {
-                val sel = try { JsonApi.inferSearch(data, kw) } catch (_: IllegalArgumentException) { continue }
-                val n = JsonApi.select(data, sel["selectItems"] as String).size
-                if (n > bestN) { best = Triple(rec, data, sel); bestN = n }
+        var noBox = 0
+        kwLoop@ for (kw in keywords) {
+            var retried = false
+            while (true) {
+                val mark = browser.records().size
+                if (!doSearch(browser, kw, notes)) {
+                    // 搜索框不可用（找不到、被验证码遮挡等）：绕开它，直接加载候选搜索链接
+                    directSearch(browser, url, homeDom, name, kw, notes)?.let { return it.withMeta(name, icon) }
+                    noBox++
+                    break
+                }
+                val fresh = browser.records().drop(mark)
+
+                // JSON 接口：挑条目数最多的搜索响应
+                var best: Triple<CaptureRecord, JsonElement, Map<String, Any?>>? = null
+                var bestN = -1
+                for ((rec, data) in apiRecords(fresh)) {
+                    val sel = try { JsonApi.inferSearch(data, kw) } catch (_: IllegalArgumentException) { continue }
+                    val n = JsonApi.select(data, sel["selectItems"] as String).size
+                    if (n > bestN) { best = Triple(rec, data, sel); bestN = n }
+                }
+                if (best != null) {
+                    val res = jsonFlow(browser, name, kw, best.first, best.second, best.third, notes)
+                    if (res.ok) return res.withMeta(name, icon)
+                    notes += "关键词「$kw」的 json-api 流程未通过: ${res.report?.message ?: ""}"
+                    break
+                }
+                val h = htmlFlow(browser, name, kw, notes)
+                if (h != null && h.ok) return h.withMeta(name, icon)
+                if (h == null && !retried && RATE_LIMIT.containsMatchIn(Jsoup.parse(browser.call("dom")).text())) {
+                    retried = true
+                    notes += "站点限制了搜索频率，等待后重试「$kw」"
+                    sleep(pauseMs * 2)
+                    browser.load(url); browser.waitIdle()
+                    continue
+                }
+                if (h == null) {
+                    val snip = try { browser.call("snippet") } catch (_: Exception) { "" }
+                    notes += "搜索后停在 ${browser.currentUrl()}，页面：${snip.take(100)}"
+                }
+                break
             }
-            if (best != null) {
-                val res = jsonFlow(browser, name, kw, best.first, best.second, best.third, notes)
-                if (res.ok) return res
-                notes += "关键词「$kw」的 json-api 流程未通过: ${res.report?.message ?: ""}"
-            } else {
-                htmlFlow(browser, name, kw, notes)?.let { if (it.ok) return it }
-            }
+            if (noBox >= 2) { notes += "页面没有可用的搜索框，换关键词也没有意义，已停止"; break@kwLoop }
             browser.load(url); browser.waitIdle()
+            sleep(pauseMs)
         }
         notes += "所有关键词都没有生成可用规则"
         return FlowResult(false, notes = notes)
     }
 
-    private fun htmlFlow(b: Browser, name: String, kw: String, notes: MutableList<String>): FlowResult? {
-        val searchUrl = subKeyword(b.currentUrl(), kw)
-        if ("{keyword}" !in searchUrl) { notes += "搜索后网址里没有关键词，无法生成 HTML 规则"; return null }
-        val dom = b.call("dom")
-        val rule = try { RuleGen.generateRule(dom, kw, searchUrl, name) } catch (e: GenerateException) {
-            notes += "HTML 解析失败: ${e.message}"; return null
+    private const val MAX_DIRECT = 8
+
+    /** 不经过搜索框：依次加载首页表单推导出的、以及常见的搜索链接，第一个能识别出结果的就用。 */
+    private fun directSearch(
+        b: Browser, homeUrl: String, homeDom: String, name: String, kw: String, notes: MutableList<String>,
+    ): FlowResult? {
+        val tpls = Discover.candidates(homeUrl, homeDom, ArrayList()).take(MAX_DIRECT)
+        for (tpl in tpls) {
+            b.load(tpl.replace("{keyword}", enc(kw, false)))
+            b.waitIdle()
+            val own = ArrayList<String>()
+            val r = htmlFlow(b, name, kw, own) ?: continue
+            if (!r.ok) continue
+            notes += "搜索框方式没成功，改用直接搜索链接：$tpl"
+            return r.copy(notes = notes + r.notes)
         }
-        val rep = RuleGen.testRule(rule, dom, kw)
-        return FlowResult(rep.ok, "html", false, rule, rep, kw, notes)
+        return null
     }
+
+    // ---------- HTML 站点 ----------
+
+    private fun htmlFlow(b: Browser, name: String, kw: String, notes: MutableList<String>): FlowResult? {
+        val searchPageUrl = b.currentUrl()
+        val searchUrl = subKeyword(searchPageUrl, kw)
+        if ("{keyword}" !in searchUrl) {
+            notes += "搜索后网址里没有关键词（站点可能用 POST 搜索；Animeko 的 HTML 数据源只支持带关键词的 GET 链接）"
+            return null
+        }
+        val rendered = b.call("dom")
+        val raw = b.fetchRaw(searchPageUrl)
+
+        fun tryGen(html: String): Pair<JsonObject, TestReport>? {
+            val rule = try { RuleGen.generateRule(html, kw, searchUrl, name) } catch (_: GenerateException) { return null }
+            return rule to RuleGen.testRule(rule, html, kw)
+        }
+
+        // 以 Animeko 实际会拿到的原始 HTML 为准；原始 HTML 里没有结果、只有渲染后才有，说明依赖 JS
+        val base: String
+        if (raw != null) {
+            val r = tryGen(raw)
+            if (r == null || !r.second.ok) {
+                val renderedOk = tryGen(rendered)?.second?.ok == true
+                notes += if (renderedOk) "搜索结果是由 JS 渲染出来的，Animeko 的 HTML 数据源读不到原始页面里的结果"
+                else "搜索结果页里没有识别出结果列表: ${r?.second?.message ?: "找不到包含关键词的元素"}"
+                return null
+            }
+            base = raw
+        } else {
+            notes += "无法获取原始 HTML，改用渲染后的页面生成规则（可能与 Animeko 实际抓到的不同）"
+            base = rendered
+        }
+        val (rule0, searchRep) = tryGen(base) ?: run { notes += "HTML 解析失败"; return null }
+        if (!searchRep.ok) { notes += "搜索规则测试未通过: ${searchRep.message}"; return null }
+
+        var rule = rule0.editConfig { it["requestInterval"] = JsonPrimitive(3000) }
+
+        // ---- 步骤 2：详情页的线路与剧集 ----
+        val idx = searchRep.names.indexOfFirst { RuleGen.norm(kw) in RuleGen.norm(it) }.coerceAtLeast(0)
+        val detailUrl = resolve(searchPageUrl, searchRep.links[idx])
+        b.load(detailUrl)
+        b.waitIdle()
+        val detailRendered = b.call("dom")
+        val detailRaw = b.fetchRaw(detailUrl)
+        val detailBase = detailRaw ?: detailRendered
+        val gen = DetailGen.generate(detailBase)
+        if (gen == null) {
+            notes += if (detailRaw != null && DetailGen.generate(detailRendered) != null)
+                "剧集列表是由 JS 渲染出来的，Animeko 读不到原始页面里的剧集"
+            else "详情页上没找到剧集列表（可能要点进播放页，或页面需要验证）"
+            return FlowResult(true, "html", true, rule, searchRep, kw, notes)
+        }
+        gen.note?.let { notes += it }
+        rule = rule.editConfig { cfg -> gen.config.forEach { (k, v) -> cfg[k] = v } }
+        val cfg = rule["arguments"]!!.jsonObject["searchConfig"]!!.jsonObject
+        val detailRep = DetailGen.test(cfg, detailBase)
+        val report = TestReport(searchRep.ok && detailRep.ok, "${searchRep.message}；${detailRep.message}", searchRep.names, searchRep.links)
+        if (!detailRep.ok) notes += "剧集规则测试未通过: ${detailRep.message}"
+        return FlowResult(true, "html", !detailRep.ok, rule, report, kw, notes)
+    }
+
+    // ---------- JSON 接口站点 ----------
 
     private fun jsonFlow(
         b: Browser, name: String, kw: String, srec: CaptureRecord, sdata: JsonElement,

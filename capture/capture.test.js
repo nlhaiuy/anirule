@@ -55,7 +55,7 @@ function makeEnv(body, { fetchImpl, XHR } = {}) {
     Event: class { constructor(t, o) { this.type = t; Object.assign(this, o); } },
     KeyboardEvent: class { constructor(t, o) { this.type = t; Object.assign(this, o); } },
     location: { href: 'https://site.example/' },
-    document: { readyState: 'complete', documentElement: Object.assign(html, { outerHTML: '<html></html>' }),
+    document: { readyState: 'complete', title: '搜索结果', documentElement: Object.assign(html, { outerHTML: '<html></html>' }),
       getElementsByTagName: (t) => html.getElementsByTagName(t) },
     history: { pushState() {}, replaceState() {} },
     addEventListener() {},
@@ -226,4 +226,28 @@ test('重复注入不会重复挂钩', async () => {
   await flush();
   assert.strictEqual(calls, 1);
   assert.strictEqual(bridge.length, 1);
+});
+
+test('rawFetch：用 fetch 取页面并作为记录回传', async () => {
+  let asked = null;
+  const { g, bridge } = makeEnv(new El('body'), { fetchImpl: (u, o) => { asked = [u, o]; return Promise.resolve(fakeResponse('<html>ok</html>', 'text/html')); } });
+  assert.strictEqual(g.__rg.rawFetch('https://site.example/search?wd=x'), 'started');
+  await flush();
+  assert.strictEqual(JSON.stringify(asked[1]), '{"credentials":"include"}');
+  assert.strictEqual(bridge.length, 1);
+  assert.strictEqual(bridge[0].url, 'https://site.example/search?wd=x');
+  assert.strictEqual(bridge[0].response, '<html>ok</html>');
+});
+
+test('snippet：返回标题和正文开头，且不超过 200 字', () => {
+  const { g } = makeEnv(new El('body'));
+  g.document.body = { innerText: '搜索过于频繁，请稍后再试'.repeat(40) };
+  const s = g.__rg.snippet();
+  assert.ok(s.startsWith('搜索结果 搜索过于频繁'));
+  assert.ok(s.length <= 200);
+});
+
+test('snippet：没有 body 时不报错', () => {
+  const { g } = makeEnv(new El('body'));
+  assert.strictEqual(g.__rg.snippet(), '搜索结果');
 });
