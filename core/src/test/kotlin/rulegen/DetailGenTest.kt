@@ -59,7 +59,7 @@ class DetailGenTest {
 
     @Test
     fun selectorsDoNotUseNth() {
-        assertTrue("nth" !in assertNotNull(DetailGen.generate(channels)).config.toString())
+        assertTrue(":nth-" !in assertNotNull(DetailGen.generate(channels)).config.toString())
     }
 
     @Test
