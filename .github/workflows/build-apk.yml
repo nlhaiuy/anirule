@@ -37,15 +37,6 @@ jobs:
           name: anirule-debug-apk
           path: anirule-debug.apk
 
-      # 放到 Releases 页面，手机上直接点开下载（不需要解压）
-      - name: Publish to Releases (nightly)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly
-          name: Latest debug build
-          prerelease: true
-          files: anirule-debug.apk
-
       # 测试单独跑：Kotlin 测试失败不影响 APK 产出，但会在日志里显示
       - name: Run core tests
         continue-on-error: true
